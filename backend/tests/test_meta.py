@@ -50,6 +50,13 @@ def test_options_exposes_hazard_state_machine(client):
     registered_targets = {item["target_status"] for item in transitions["registered"]}
     assert registered_targets == {"rectifying", "closed"}
 
+    # 销号类流转必须向前端声明：验收意见与销号日期均为必填
+    close_option = next(
+        item for item in transitions["registered"] if item["target_status"] == "closed"
+    )
+    assert close_option["require_content"] is True
+    assert close_option["require_closed_on"] is True
+
 
 def test_root_and_docs(client):
     assert client.get("/").status_code == 200

@@ -45,6 +45,8 @@ async function onTransition(payload) {
     toast.success('隐患状态已更新')
   } catch (error) {
     toast.error(error.message)
+    // 状态被他人变更（如对方已抢先销号）：刷新为最新数据，避免停留在过期页面
+    if (error.status === 409) await load()
   } finally {
     submitting.value = false
   }

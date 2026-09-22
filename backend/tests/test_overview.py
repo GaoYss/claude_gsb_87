@@ -39,7 +39,11 @@ def test_summary_counts_and_distributions(client, make_reservoir):
     ).json()
     client.post(
         f"{API}/hazards/{closed['id']}/transition",
-        json={"target_status": "closed", "content": "立行立改完成"},
+        json={
+            "target_status": "closed",
+            "content": "立行立改完成",
+            "closed_on": date.today().isoformat(),
+        },
     )
 
     summary = client.get(f"{API}/overview/summary").json()

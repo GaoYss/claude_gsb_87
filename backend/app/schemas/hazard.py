@@ -101,8 +101,11 @@ class HazardTransitionRequest(BaseModel):
     """状态流转请求。"""
 
     target_status: HazardStatus
-    content: str | None = Field(default=None, description="流转说明，会写入整改跟踪流水")
+    content: str | None = Field(
+        default=None, description="流转说明，会写入整改跟踪流水；销号时即为验收意见"
+    )
     operator: str | None = Field(default=None, max_length=64, description="操作人")
+    closed_on: date | None = Field(default=None, description="销号日期，目标为已销号时必填")
 
 
 class HazardTransitionOption(BaseModel):
@@ -111,6 +114,7 @@ class HazardTransitionOption(BaseModel):
     target_status: HazardStatus
     label: str
     require_content: bool = False
+    require_closed_on: bool = Field(default=False, description="是否必须填写销号日期")
 
 
 class HazardDetail(HazardRead):

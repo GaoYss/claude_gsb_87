@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 
 import StatusTag from '@/components/common/StatusTag.vue'
 import { useDictionaryStore } from '@/stores/dictionary'
+import { todayString } from '@/utils/format'
 
 const props = defineProps({
   status: { type: String, required: true },
@@ -15,10 +16,13 @@ const emit = defineEmits(['submit'])
 const dictionary = useDictionaryStore()
 const content = ref('')
 const operator = ref(props.assignee || '')
+const closedOn = ref(todayString())
 const error = ref('')
 const activeTarget = ref(null)
 
 const transitions = computed(() => dictionary.transitionsFor(props.status))
+// 当前可选流转里包含销号时，才需要展示销号日期输入
+const hasClosureOption = computed(() => transitions.value.some((item) => item.require_closed_on))
 
 watch(
   () => props.assignee,
@@ -29,16 +33,27 @@ watch(
 
 function activate(transition) {
   error.value = ''
-  if (transition.require_content && !content.value.trim()) {
-    activeTarget.value = transition.target_status
+  activeTarget.value = transition.target_status
+
+  if (transition.require_closed_on) {
+    // 与后端一致的销号前置校验：验收意见、销号日期缺一不可
+    const missing = []
+    if (!content.value.trim()) missing.push('验收意见')
+    if (!closedOn.value) missing.push('销号日期')
+    if (missing.length) {
+      error.value = `销号需要同时提供验收意见和销号日期，缺少：${missing.join('、')}`
+      return
+    }
+  } else if (transition.require_content && !content.value.trim()) {
     error.value = `「${transition.label}」需要先填写处理说明`
     return
   }
-  activeTarget.value = transition.target_status
+
   emit('submit', {
     target_status: transition.target_status,
     content: content.value.trim() || null,
     operator: operator.value.trim() || null,
+    closed_on: transition.require_closed_on ? closedOn.value || null : null,
   })
 }
 </script>
@@ -55,11 +70,25 @@ function activate(transition) {
       <template v-if="transitions.length">
         <div class="row-gap" style="margin-bottom: 10px">
           <input v-model="operator" class="input" style="max-width: 200px" placeholder="操作人" />
+          <template v-if="hasClosureOption">
+            <label class="muted" style="align-self: center" for="closed-on-input">销号日期</label>
+            <input
+              id="closed-on-input"
+              v-model="closedOn"
+              class="input"
+              style="max-width: 180px"
+              type="date"
+            />
+          </template>
         </div>
         <textarea
           v-model="content"
           class="textarea"
-          placeholder="处理说明（提交验收、退回整改、销号时必填）"
+          :placeholder="
+            hasClosureOption
+              ? '处理说明（销号时填写验收意见；提交验收、退回整改时必填）'
+              : '处理说明（提交验收、退回整改时必填）'
+          "
         />
         <p v-if="error" class="muted" style="color: var(--danger); margin: 8px 0 0">{{ error }}</p>
         <div class="row-gap" style="margin-top: 12px">
@@ -80,4 +109,3 @@ function activate(transition) {
     </div>
   </section>
 </template>
-

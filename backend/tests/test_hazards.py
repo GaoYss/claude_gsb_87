@@ -2,6 +2,11 @@
 
 from datetime import date, timedelta
 
+from sqlalchemy.orm import sessionmaker
+
+from app.models import Hazard
+from app.schemas.hazard import HazardTransitionRequest
+from app.services import hazard_service
 from tests.conftest import API
 
 
@@ -116,7 +121,15 @@ def test_full_rectification_flow(client, make_reservoir):
     assert rejected.json()["status"] == "rectifying"
 
     client.post(url, json={"target_status": "pending_acceptance", "content": "已重新处理"})
-    closed = client.post(url, json={"target_status": "closed", "operator": "验收组"})
+    closed = client.post(
+        url,
+        json={
+            "target_status": "closed",
+            "content": "现场复核无渗水，验收通过",
+            "operator": "验收组",
+            "closed_on": date.today().isoformat(),
+        },
+    )
     assert closed.status_code == 200
     body = closed.json()
     assert body["status"] == "closed"
@@ -191,4 +204,113 @@ def test_hazard_filters_and_delete(client, make_reservoir):
 
 def test_missing_hazard_returns_404(client):
     assert client.get(f"{API}/hazards/123456").status_code == 404
+
+
+def test_close_requires_acceptance_opinion_and_closed_on(client, make_reservoir):
+    """销号必须同时具备验收意见和销号日期，缺项时明确提示且不留任何痕迹。"""
+    reservoir = make_reservoir()
+    hazard = _create_hazard(client, reservoir["id"])
+    url = f"{API}/hazards/{hazard['id']}/transition"
+    records_before = len(hazard["rectifications"])
+
+    both_missing = client.post(url, json={"target_status": "closed"})
+    assert both_missing.status_code == 422
+    detail = both_missing.json()["detail"]
+    assert "验收意见" in detail
+    assert "销号日期" in detail
+
+    no_date = client.post(
+        url, json={"target_status": "closed", "content": "验收通过", "operator": "验收组"}
+    )
+    assert no_date.status_code == 422
+    assert "销号日期" in no_date.json()["detail"]
+
+    no_opinion = client.post(
+        url, json={"target_status": "closed", "closed_on": date.today().isoformat()}
+    )
+    assert no_opinion.status_code == 422
+    assert "验收意见" in no_opinion.json()["detail"]
+
+    # 「验收通过并销号」路径同样强制验收意见
+    client.post(url, json={"target_status": "rectifying"})
+    client.post(url, json={"target_status": "pending_acceptance", "content": "已处理，申请验收"})
+    pending_close = client.post(
+        url, json={"target_status": "closed", "closed_on": date.today().isoformat()}
+    )
+    assert pending_close.status_code == 422
+    assert "验收意见" in pending_close.json()["detail"]
+
+    # 校验失败不留半成品：状态、销号日期、流水条数都与之前一致
+    after = client.get(f"{API}/hazards/{hazard['id']}").json()
+    assert after["status"] == "pending_acceptance"
+    assert after["closed_on"] is None
+    assert len(after["rectifications"]) == records_before + 2  # 只有两次正常流转的流水
+
+
+def test_close_records_who_when_and_acceptance_opinion(client, make_reservoir):
+    """销号后，谁、在什么时点、依据哪份验收意见完成的销号都可回看。"""
+    reservoir = make_reservoir()
+    hazard = _create_hazard(client, reservoir["id"])
+    closed_on = (date.today() - timedelta(days=1)).isoformat()
+
+    response = client.post(
+        f"{API}/hazards/{hazard['id']}/transition",
+        json={
+            "target_status": "closed",
+            "content": "现场复核裂缝已灌浆密实，验收通过",
+            "operator": "验收组-王五",
+            "closed_on": closed_on,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "closed"
+    # 销号日期以验收日期为准，不再由服务端擅自写成今天
+    assert body["closed_on"] == closed_on
+
+    record = body["rectifications"][-1]
+    assert record["action"] == "close"
+    assert record["content"] == "现场复核裂缝已灌浆密实，验收通过"
+    assert record["operator"] == "验收组-王五"
+    assert record["recorded_at"]
+    assert record["status_from"] == "registered"
+    assert record["status_to"] == "closed"
+
+
+def test_concurrent_close_only_one_succeeds(client, make_reservoir, db_session):
+    """两人同时销号同一条隐患：只有一次生效，另一方收到冲突提示而非静默覆盖。"""
+    reservoir = make_reservoir()
+    hazard = _create_hazard(client, reservoir["id"])
+    url = f"{API}/hazards/{hazard['id']}/transition"
+    payload = {
+        "target_status": "closed",
+        "content": "现场复核合格，验收通过",
+        "operator": "验收组A",
+        "closed_on": date.today().isoformat(),
+    }
+
+    # 本请求先读到旧状态（模拟销号页面早已打开），持有引用防止会话缓存被回收
+    stale = db_session.get(Hazard, hazard["id"])
+    assert stale.status == "registered"
+
+    # 另一会话抢先完成销号（走同一套业务逻辑并提交）
+    other_session = sessionmaker(bind=db_session.bind)()
+    try:
+        hazard_service.transition_hazard(
+            other_session, hazard["id"], HazardTransitionRequest(**payload)
+        )
+    finally:
+        other_session.close()
+
+    # 本请求仍拿着旧状态，推进时应被条件更新拦下：409，而不是覆盖对方结果
+    response = client.post(url, json=payload)
+    assert response.status_code == 409
+    assert "他人" in response.json()["detail"]
+
+    # 全库只有抢先那一方的销号生效：一条销号流水，状态与流水未被重复写入
+    detail = client.get(f"{API}/hazards/{hazard['id']}").json()
+    assert detail["status"] == "closed"
+    closes = [r for r in detail["rectifications"] if r["status_to"] == "closed"]
+    assert len(closes) == 1
+    assert closes[0]["operator"] == "验收组A"
 

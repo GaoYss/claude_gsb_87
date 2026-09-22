@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import date
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.errors import ConflictError, InvalidOperationError, NotFoundError
@@ -29,6 +29,7 @@ class TransitionRule:
     label: str
     action: RectificationAction
     require_content: bool = False
+    require_closed_on: bool = False
 
 
 def _rule(
@@ -36,20 +37,33 @@ def _rule(
     label: str,
     action: RectificationAction,
     require_content: bool = False,
+    require_closed_on: bool = False,
 ) -> TransitionRule:
-    return TransitionRule(target=target, label=label, action=action, require_content=require_content)
+    return TransitionRule(
+        target=target,
+        label=label,
+        action=action,
+        require_content=require_content,
+        require_closed_on=require_closed_on,
+    )
+
+
+def _close_rule(label: str, action: RectificationAction) -> TransitionRule:
+    """销号类流转：验收意见（content）与销号日期缺一不可。"""
+    return _rule(
+        HazardStatus.CLOSED,
+        label,
+        action,
+        require_content=True,
+        require_closed_on=True,
+    )
 
 
 # 隐患整改状态机：待整改 -> 整改中 -> 待验收 -> 已销号（已销号为终态）
 TRANSITION_RULES: dict[str, list[TransitionRule]] = {
     HazardStatus.REGISTERED.value: [
         _rule(HazardStatus.RECTIFYING, "开始整改", RectificationAction.MEASURE),
-        _rule(
-            HazardStatus.CLOSED,
-            "直接销号（立行立改）",
-            RectificationAction.CLOSE,
-            require_content=True,
-        ),
+        _close_rule("直接销号（立行立改）", RectificationAction.CLOSE),
     ],
     HazardStatus.RECTIFYING.value: [
         _rule(
@@ -58,10 +72,10 @@ TRANSITION_RULES: dict[str, list[TransitionRule]] = {
             RectificationAction.PROGRESS,
             require_content=True,
         ),
-        _rule(HazardStatus.CLOSED, "直接销号", RectificationAction.CLOSE, require_content=True),
+        _close_rule("直接销号", RectificationAction.CLOSE),
     ],
     HazardStatus.PENDING_ACCEPTANCE.value: [
-        _rule(HazardStatus.CLOSED, "验收通过并销号", RectificationAction.VERIFY),
+        _close_rule("验收通过并销号", RectificationAction.VERIFY),
         _rule(
             HazardStatus.RECTIFYING,
             "验收不通过，退回整改",
@@ -79,6 +93,7 @@ def available_transitions(status: str) -> list[HazardTransitionOption]:
             target_status=rule.target,
             label=rule.label,
             require_content=rule.require_content,
+            require_closed_on=rule.require_closed_on,
         )
         for rule in TRANSITION_RULES.get(status, [])
     ]
@@ -226,8 +241,37 @@ def update_hazard(db: Session, hazard_id: int, payload: HazardUpdate) -> Hazard:
     return get_hazard(db, hazard_id)
 
 
+def _validate_transition(
+    rule: TransitionRule, payload: HazardTransitionRequest, content: str
+) -> date | None:
+    """流转前的纯校验，不触碰任何数据；返回应写入的销号日期（非销号流转为 None）。
+
+    销号必须同时具备验收意见和销号日期，缺项时逐项列明，调用方据此拒绝流转。
+    """
+    if not rule.require_closed_on:
+        if rule.require_content and not content:
+            raise InvalidOperationError(f"变更为「{rule.label}」需要填写处理说明")
+        return None
+
+    missing = []
+    if not content:
+        missing.append("验收意见")
+    if payload.closed_on is None:
+        missing.append("销号日期")
+    if missing:
+        raise InvalidOperationError(
+            f"销号需要同时提供验收意见和销号日期，缺少：{'、'.join(missing)}"
+        )
+    return payload.closed_on
+
+
 def transition_hazard(db: Session, hazard_id: int, payload: HazardTransitionRequest) -> Hazard:
-    """按状态机流转隐患状态，并自动写入整改跟踪流水。"""
+    """按状态机流转隐患状态，并自动写入整改跟踪流水。
+
+    校验全部前置；状态推进用「当前状态仍为已读值」的条件更新完成，
+    与流水写入同属一个事务——要么一起成立，要么整体回滚，不留半成品。
+    两人同时销号同一条隐患时，只有一方的条件更新能命中，另一方收到冲突提示。
+    """
     hazard = get_hazard(db, hazard_id)
     target = payload.target_status.value
     rule = _find_rule(hazard.status, target)
@@ -238,12 +282,21 @@ def transition_hazard(db: Session, hazard_id: int, payload: HazardTransitionRequ
         )
 
     content = (payload.content or "").strip()
-    if rule.require_content and not content:
-        raise InvalidOperationError(f"变更为「{rule.label}」需要填写处理说明")
+    closed_on = _validate_transition(rule, payload, content)
 
     status_from = hazard.status
-    hazard.status = target
-    hazard.closed_on = date.today() if target == HazardStatus.CLOSED.value else None
+    # 条件更新（compare-and-swap）：只有状态仍等于读取到的值时才推进。
+    # 并发销号时后提交的一方 rowcount 为 0，不会静默覆盖前者的结果。
+    result = db.execute(
+        update(Hazard)
+        .where(Hazard.id == hazard.id, Hazard.status == status_from)
+        .values(status=target, closed_on=closed_on, updated_at=now_local())
+        .execution_options(synchronize_session="evaluate")
+    )
+    if result.rowcount != 1:
+        db.rollback()
+        raise ConflictError("该隐患的状态刚被他人变更（可能已完成销号），请刷新后重试")
+
     hazard.rectifications.append(
         HazardRectification(
             action=rule.action.value,
