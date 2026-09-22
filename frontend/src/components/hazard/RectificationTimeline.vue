@@ -1,11 +1,15 @@
 <script setup>
 import StatusTag from '@/components/common/StatusTag.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
-import { formatDateTime } from '@/utils/format'
+import { formatDate, formatDateTime } from '@/utils/format'
 
 defineProps({
   records: { type: Array, default: () => [] },
 })
+
+function isCloseRecord(record) {
+  return record.status_to === 'closed'
+}
 </script>
 
 <template>
@@ -23,7 +27,47 @@ defineProps({
         </span>
       </div>
       <div class="timeline-body">{{ record.content }}</div>
+
+      <!-- 销号审计信息：验收依据 + 业务销号日期，随流水固化、随时可回看 -->
+      <div v-if="isCloseRecord(record)" class="close-audit">
+        <div v-if="record.acceptance_opinion" class="close-audit-row">
+          <span class="close-audit-label">验收意见</span>
+          <span>{{ record.acceptance_opinion }}</span>
+        </div>
+        <div class="close-audit-row">
+          <span class="close-audit-label">销号日期</span>
+          <span>{{ formatDate(record.closed_on) }}</span>
+        </div>
+        <div class="close-audit-row">
+          <span class="close-audit-label">销号经办</span>
+          <span>{{ record.operator || '—' }}（{{ formatDateTime(record.recorded_at) }}）</span>
+        </div>
+      </div>
     </li>
   </ol>
 </template>
 
+<style scoped>
+.close-audit {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color, #e3e6eb);
+  border-radius: 6px;
+  background: var(--surface-muted, #f7f8fa);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.close-audit-row {
+  display: flex;
+  gap: 8px;
+}
+
+.close-audit-label {
+  flex: none;
+  width: 64px;
+  color: var(--text-muted, #8a9099);
+}
+</style>

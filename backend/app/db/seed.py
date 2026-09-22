@@ -417,7 +417,16 @@ HAZARDS: list[dict] = [
         "records": [
             ("measure", "安排养护队回填碎石并夯实", "李文倩", 30, "registered", "rectifying"),
             ("progress", "回填夯实完成，申请验收", "李文倩", 18, "rectifying", "pending_acceptance"),
-            ("verify", "现场复核路面平整，无积水，验收通过", "云岭县水利局", 12, "pending_acceptance", "closed"),
+            (
+                "verify",
+                "现场复核路面平整，无积水，验收通过",
+                "云岭县水利局",
+                12,
+                "pending_acceptance",
+                "closed",
+                "现场复核路面平整、无积水，回填部位与周边路面衔接平顺，同意销号",
+                12,
+            ),
         ],
     },
     {
@@ -453,7 +462,16 @@ HAZARDS: list[dict] = [
         "plan": "更换灯具并检查线路。",
         "records": [
             ("measure", "采购同型号灯具并更换", "陈立", 52, "registered", "rectifying"),
-            ("close", "灯具更换完成，线路测试正常，直接销号", "陈立", 50, "rectifying", "closed"),
+            (
+                "close",
+                "灯具更换完成，线路测试正常，直接销号",
+                "陈立",
+                50,
+                "rectifying",
+                "closed",
+                "灯具更换完成、线路测试正常，夜间照明恢复，立行立改符合销号条件",
+                50,
+            ),
         ],
     },
     {
@@ -604,17 +622,25 @@ def seed_demo_data() -> None:
                     status_to="registered",
                 )
             )
-            for action, content, operator, days_ago, status_from, status_to in plan["records"]:
-                hazard.rectifications.append(
-                    HazardRectification(
-                        action=action,
-                        content=content,
-                        operator=operator,
-                        recorded_at=now_local() - timedelta(days=days_ago),
-                        status_from=status_from,
-                        status_to=status_to,
-                    )
+            for record in plan["records"]:
+                # 元组前 6 项：记录类型、内容、记录人、距今天数、变更前状态、变更后状态；
+                # 销号流水另有第 7、8 项：验收意见、销号日期（距今天数）
+                action, content, operator, days_ago, status_from, status_to = record[:6]
+                acceptance_opinion = record[6] if len(record) > 6 else None
+                closed_offset = record[7] if len(record) > 7 else None
+                rectification = HazardRectification(
+                    action=action,
+                    content=content,
+                    operator=operator,
+                    recorded_at=now_local() - timedelta(days=days_ago),
+                    status_from=status_from,
+                    status_to=status_to,
                 )
+                if acceptance_opinion:
+                    rectification.acceptance_opinion = acceptance_opinion
+                if closed_offset is not None:
+                    rectification.closed_on = today - timedelta(days=closed_offset)
+                hazard.rectifications.append(rectification)
             db.add(hazard)
 
         db.commit()

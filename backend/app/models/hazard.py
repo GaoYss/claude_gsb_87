@@ -75,8 +75,24 @@ class HazardRectification(TimestampMixin, Base):
     operator: Mapped[str | None] = mapped_column(String(64), comment="记录人")
     status_from: Mapped[str | None] = mapped_column(String(24), comment="变更前状态")
     status_to: Mapped[str | None] = mapped_column(String(24), comment="变更后状态")
+    acceptance_opinion: Mapped[str | None] = mapped_column(
+        Text, comment="验收意见：销号流水必填，固化本次销号所依据的验收结论"
+    )
+    closed_on: Mapped[date | None] = mapped_column(
+        Date, comment="销号日期：销号流水必填，记录业务上确认销号的日期"
+    )
+    acceptance_record_id: Mapped[int | None] = mapped_column(
+        ForeignKey("hazard_rectification.id", ondelete="SET NULL"),
+        comment="销号所依据的验收意见流水（关联最近一条验收记录）",
+    )
     recorded_at: Mapped[datetime] = mapped_column(
-        DateTime, default=now_local, index=True, comment="记录时间"
+        DateTime, default=now_local, index=True, comment="记录时间（系统时点）"
     )
 
     hazard: Mapped["Hazard"] = relationship(back_populates="rectifications")
+    acceptance_record: Mapped["HazardRectification | None"] = relationship(
+        "HazardRectification",
+        remote_side="HazardRectification.id",
+        foreign_keys="HazardRectification.acceptance_record_id",
+        viewonly=True,
+    )

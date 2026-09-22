@@ -94,6 +94,9 @@ class HazardRectificationRead(BaseModel):
     operator: str | None = None
     status_from: HazardStatus | None = None
     status_to: HazardStatus | None = None
+    acceptance_opinion: str | None = None
+    closed_on: date | None = None
+    acceptance_record_id: int | None = None
     recorded_at: datetime
 
 
@@ -103,6 +106,12 @@ class HazardTransitionRequest(BaseModel):
     target_status: HazardStatus
     content: str | None = Field(default=None, description="流转说明，会写入整改跟踪流水")
     operator: str | None = Field(default=None, max_length=64, description="操作人")
+    acceptance_opinion: str | None = Field(
+        default=None, description="验收意见：销号时必填，作为销号依据固化"
+    )
+    closed_on: date | None = Field(
+        default=None, description="销号日期：销号时必填，缺省为今天（仅销号流转使用）"
+    )
 
 
 class HazardTransitionOption(BaseModel):
@@ -111,6 +120,8 @@ class HazardTransitionOption(BaseModel):
     target_status: HazardStatus
     label: str
     require_content: bool = False
+    require_acceptance_opinion: bool = False
+    require_closed_on: bool = False
 
 
 class HazardDetail(HazardRead):
